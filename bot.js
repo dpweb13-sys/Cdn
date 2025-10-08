@@ -1,33 +1,54 @@
-import { Telegraf } from "telegraf";
-import dotenv from "dotenv";
-import axios from "axios";
-dotenv.config();
+const axios = require("axios");
+const { Telegraf } = require("telegraf");
+const { v4: uuidv4 } = require("uuid");
+const File = require("./models/File");
+const config = require("./config");
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const bot = new Telegraf(config.BOT_TOKEN);
 
-bot.start((ctx) =>
-  ctx.reply("📁 Send me any file — I’ll upload it and give you a clean CDN link.")
-);
+bot.start((ctx) => {
+  ctx.reply("📁 Welcome! Send me a photo/video/file to upload it securely.");
+});
 
-bot.on("document", async (ctx) => {
+bot.on(["photo", "video", "document"], async (ctx) => {
   try {
-    const file = ctx.message.document;
-    const link = await ctx.telegram.getFileLink(file.file_id);
-    const response = await axios.get(link.href, { responseType: "arraybuffer" });
-    const buffer = Buffer.from(response.data).toString("base64");
+    await ctx.reply("⏳ Uploading your file...");
 
-    const upload = await axios.post("https://YOUR_RENDER_URL/api/upload", {
-      buffer,
-      filename: file.file_name,
-      mimetype: file.mime_type,
+    // File link fetch
+    const fileId =
+      ctx.message.document?.file_id ||
+      ctx.message.photo?.pop()?.file_id ||
+      ctx.message.video?.file_id;
+    const file = await ctx.telegram.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${config.BOT_TOKEN}/${file.file_path}`;
+
+    // Upload to Catbox
+    const catboxResp = await axios.post(
+      "https://catbox.moe/user/api.php",
+      new URLSearchParams({
+        reqtype: "urlupload",
+        url: fileUrl,
+      })
+    );
+
+    const uniqueId = uuidv4().slice(0, 4);
+
+    // Save to MongoDB
+    await File.create({
+      _id: uniqueId,
+      catbox_url: catboxResp.data,
+      telegram_url: fileUrl,
+      type: ctx.message.document?.mime_type || ctx.message.video?.mime_type || "image/jpeg",
+      size: ctx.message.document?.file_size || ctx.message.video?.file_size || 0,
     });
 
-    await ctx.reply(`✅ Uploaded!\n\n🔗 ${upload.data.link}`);
+    const publicLink = `${config.VERCE_URL}/cdn/${uniqueId}.jpg`;
+
+    await ctx.reply(`✅ Uploaded successfully!\n\n📎 Your public link:\n${publicLink}`);
   } catch (err) {
-    console.log(err);
-    await ctx.reply("❌ Upload failed");
+    console.error(err);
+    ctx.reply("❌ Upload failed. Try again later.");
   }
 });
 
-bot.launch();
-console.log("🤖 Telegram Bot Started");
+module.exports = bot;
